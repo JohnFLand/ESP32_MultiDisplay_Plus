@@ -1,14 +1,18 @@
-# ESP32_MultiDisplay
+# ESP32_MultiDisplay_MQTT_Broker
 
-HTTP-controlled message display for ESP32-S3 with 3.5" capacitive touch screen. Displays messages, clock, weather, calendar, and astronomical times (sun & moon) with full automation support via JSON API.
+HTTP- and MQTT-controlled message display for ESP32-S3 with capacitive touch screen. Displays messages, clock, weather, calendar, and astronomical times (sun & moon) with full automation support via JSON HTTP API and MQTT. Also operates as a general-purpose MQTT broker and forwards display messages in parallel to a configurable list of secondary CYD (Cheap Yellow Display) boards.
+
+> This is the **Elecrow Advance 5″ + MQTT Broker** variant. The earlier `ESP32_MultiDisplay_Elecrow_Advance` (v2.x) sketch is the HTTP-only predecessor.
 
 ---
 
 ## Table of Contents
 
 - [Hardware Requirements](#hardware-requirements)
+- [What's New in v3.0](#whats-new-in-v30)
 - [Features](#features)
 - [Quick Start](#quick-start)
+- [Sketch Folder Structure](#sketch-folder-structure)
 - [Web Interface](#web-interface)
 - [API Reference](#api-reference)
   - [Endpoints Summary](#endpoints-summary)
@@ -18,181 +22,211 @@ HTTP-controlled message display for ESP32-S3 with 3.5" capacitive touch screen. 
   - [Schedules](#schedules)
   - [Control Endpoint](#control-endpoint)
   - [System Management](#system-management)
+- [MQTT Reference](#mqtt-reference)
+  - [Broker Details](#broker-details)
+  - [Topic Routing](#topic-routing)
+  - [Display Message Topics](#display-message-topics)
+  - [Screen Navigation Topics](#screen-navigation-topics)
+  - [Device Control Topics](#device-control-topics)
+  - [Hubitat Integration Topics](#hubitat-integration-topics)
+  - [Hubitat MQTT Display Publisher Driver](#hubitat-mqtt-display-publisher-driver)
+- [CYD Display Forwarding](#cyd-display-forwarding)
+  - [displays.json](#displaysjson)
+  - [LittleFS Upload](#littlefs-upload)
+- [Local Air Pressure](#local-air-pressure)
 - [JSON Format Reference](#json-format-reference)
-  - [Message JSON](#message-json)
-  - [Message Profile JSON](#message-profile-json)
-  - [Clock Configuration JSON](#clock-configuration-json)
-  - [Schedules JSON](#schedules-json)
-  - [Control Endpoint JSON](#control-endpoint-json)
 - [GET Format Reference](#get-format-reference)
 - [Examples](#examples)
-  - [Message Examples](#message-examples)
-  - [Message Profile Examples](#message-profile-examples)
-  - [Clock Examples](#clock-examples)
-  - [Control Examples](#control-examples)
-  - [Schedules Examples](#schedules-examples)
 - [Font Guide](#font-guide)
 - [Time and Date Formats](#time-and-date-formats)
 - [Advanced Features](#advanced-features)
-  - [Message Priority System](#message-priority-system)
-  - [Brightness Settings](#brightness-settings)
-  - [Touch Controls](#touch-controls)
-  - [Pixel Shift (Anti Burn-In)](#pixel-shift-anti-burn-in)
-  - [Message History](#message-history)
-  - [Weather & Calendar](#weather--calendar)
-    - [Local Air Pressure](#local-air-pressure)
-  - [Astro Times (Sun & Moon)](#astro-times-sun--moon)
 - [Testing](#testing)
-  - [HTTP Test Suite](#http-test-suite)
-  - [Test Inject Endpoint](#test-inject-endpoint)
-  - [Visual Verification Checklist](#visual-verification-checklist)
 - [Troubleshooting](#troubleshooting)
-- [Changelog](#changelog)
 - [License](#license)
 
 ---
 
 ## Hardware Requirements
 
-**Device:** ESP32-S3 with 3.5" AXS15231B Capacitive Touch Display
+**Device:** Elecrow CrowPanel Advance 5.0″ HMI ESP32-S3
+
+> ⚠️ **Important:** This is the *Advance* model (ESP32-S3-WROOM-1-N16R8), not the basic/TN Elecrow 5″. The two boards have completely different pin assignments, backlight circuits, and I2C buses. Do not use this sketch with the non-Advance Elecrow 5″.
 
 **Specifications:**
-- **Processor:** ESP32-S3
+- **Processor:** ESP32-S3-WROOM-1-N16R8
 - **Flash:** 16MB
-- **PSRAM:** 8MB
-- **Display:** 3.5" 320×480 capacitive touch
-- **Driver:** AXS15231B
+- **PSRAM:** 8MB OPI
+- **Display:** 5.0″ 800×480 IPS RGB parallel (ST7262-class panel)
+- **Touch:** GT911 capacitive (direct I2C on SDA=15, SCL=16, address 0x5D)
+- **Backlight:** STC8H1K28 MCU at I2C address 0x30 — 16 hardware brightness steps (0x00–0x10)
+- **Serial:** CH340K UART chip (not native USB)
 
 **Development Environment:**
-- **IDE:** Arduino IDE 2.3.7
+- **IDE:** Arduino IDE 2.x
 - **Board:** ESP32S3 Dev Module
-- **Partition:** Custom partition scheme (partitions.csv)
+- **USB CDC On Boot:** **Disabled** — the board uses a CH340K UART chip. If left enabled, all sketch serial output is silently lost.
+- **Board Package:** v3.x (tested with v3.3.7)
+- **PSRAM:** OPI PSRAM
+- **Flash:** 16MB, custom partition scheme (`partitions.csv`)
+
+**Required Libraries (install via Library Manager):**
+- `GFX Library for Arduino` (Arduino_GFX_Library) by Moon On Our Nation
+- `sMQTTBroker` by Vyacheslav Shryaev
+- `ArduinoJson` by Benoit Blanchon
+- `ArduinoOTA` (built into ESP32 Arduino core) — Arduino IDE wireless upload
+- `Update` (built into ESP32 Arduino core) — web browser OTA upload
+
+---
+
+## What's New in v3.0
+
+### MQTT Broker
+
+The device now runs a full **MQTT 3.1.1 broker** on port 1883. Any MQTT client on the network can connect to it — Hubitat, MQTT Explorer, Node-RED, ESP32 sensors, Tasmota devices, or any other standards-compliant client. The broker is general-purpose; only messages on the `display/*` and `device/*` topics trigger sketch-specific behaviour.
+
+### Parallel CYD Display Forwarding
+
+When a display message or clear command arrives via MQTT, the sketch simultaneously forwards it as HTTP POST to all configured CYD (secondary) displays. All CYDs receive the message in parallel — the total latency is the time to reach the *slowest* single display rather than the *sum* of all displays. CYD addresses are stored in `data/displays.json` on LittleFS and can be updated without reflashing.
+
+### Hubitat MQTT Integration
+
+A companion Groovy driver (`MQTT_Display_Publisher.groovy`) lets Hubitat publish display messages and control commands via MQTT with a single `publishMessage(body)` or `publishControl(json)` call — replacing the MultiPOST Sender's sequential HTTP approach. The Hubitat **MQTT Export Integration** (built-in beta, firmware 2.5+) is used to push device attribute changes (including air pressure sensor readings) to the broker automatically.
+
+### Local Air Pressure via MQTT
+
+Local air pressure is now received **event-driven** from the Hubitat MQTT Export Integration rather than polled via HTTP. The device subscribes to Hubitat device attribute events and updates the pressure value the moment Hubitat reports a change — typically within 1–2 seconds. The legacy HTTP Maker API fetch runs every 30 minutes as a backup in case MQTT is unavailable.
 
 ---
 
 ## Features
 
 ### Display & Text
-- Receive text and display parameters via HTTP POST (JSON) or GET requests
-- **22 Roboto fonts** (6pt to 48pt)
-- Text wrapping control
-- **Text rotation** (0°, 90°, 180°, 270°)
-- **Text alignment** (horizontal: left/center/right, vertical: top/middle/bottom)
-- **Scrolling** (horizontal: left/right, vertical: up/down, speed 1-9)
-- **Colors** - Named colors or hex (#RRGGBB) for background and text
-- **Flash mode** - Swap background/text colors at specified interval
-- **Pulse mode** - Brightness pulsing effect
-- **Message expiration** - Automatically return to clock after specified seconds
-- **Priority levels** - "normal" and "high" priority with override protection
+- Receive text and display parameters via HTTP POST (JSON) or GET, or via MQTT
+- **28 Roboto fonts** (6pt to 72pt)
+- Text wrapping, rotation (0°/90°/180°/270°), and alignment (left/center/right, top/middle/bottom)
+- **Scrolling** (left/right/up/down, speed 1–9)
+- **Colors** — named colors or hex (#RRGGBB)
+- **Flash mode** — swap background/text colors at specified interval
+- **Pulse mode** — brightness pulsing effect
+- **Message expiration** — auto-return to clock after specified seconds
+- **Priority levels** — normal and high with override protection
 - **Scrollable message history** (configurable size, persistent storage)
 
 ### Clock & Display
-- **Real-time clock** synced via NTP
+- Real-time clock synced via NTP; RTC backup (PCF8563)
 - Configurable fonts, colors, and time/date formats
 - **Pixel shifting** to prevent screen burn-in
 - **Screensaver** with auto-dim after inactivity
-- Touch to wake from screensaver or return to clock
-- **Night mode** - Auto-dim based on sunset/sunrise times, with three distinct brightness levels and a separate night color profile for the clock face (configurable time, date, background, and suntimes colors)
-- **Sunrise/sunset and moonrise/moonset** displayed on Clock and Weather screens using computed astronomical data
+- **Night mode** — auto-dim based on sunset/sunrise with three brightness levels and a separate night color profile
+- **Sunrise/sunset and moonrise/moonset** computed locally using Jean Meeus algorithms
 
 ### Weather
-- Fetches current conditions and 3-day forecast from Open-Meteo (no API key required)
-- **Local air pressure** — optionally fetches averaged sensor readings from a Hubitat Maker API endpoint every 5 minutes; local readings are shown without a prefix while Open-Meteo model estimates are shown with a `~` prefix; falls back to Open-Meteo when local data is absent or stale (>30 min). Local pressure can also be pushed to the device at any time via `POST /control {"localpressure": NNN}`
+- Current conditions and 3-day forecast from Open-Meteo (no API key required)
+- Local air pressure from Hubitat MQTT Export Integration (event-driven push); HTTP Maker API fallback every 30 minutes
+- Local readings shown without prefix; Open-Meteo estimates shown with `~` prefix
+- Automatic weather screen refresh when fresh local pressure arrives via MQTT
 
-### Astronomical Calculations
-- **Sun screen** — all twilight times (astronomical, nautical, civil) at dawn and dusk, plus sunrise, solar noon, sunset, and day length; all computed locally from your latitude/longitude
-- **Moon screen** — moonrise and moonset times, illumination percentage, phase angle, and a rendered phase graphic with phase name
-- Times computed using Jean Meeus algorithms (same as the WeekCalendar JavaScript app); accurate to within a few minutes for any location worldwide
-- DST-aware: UTC offset is derived at runtime from the device's POSIX timezone string, so times are always correct regardless of season
-- Computed sun times also replace Open-Meteo API sun times on the Clock and Weather screens, providing greater accuracy and eliminating a network dependency for that data
+### MQTT Broker
+- Standard MQTT 3.1.1 broker on port 1883
+- No authentication required (configurable)
+- General-purpose — all topics pass through to subscribers; only `display/*` and `device/*` topics trigger local actions
+- Full `device/control` and `device/clockconfig` command sets via MQTT (parity with HTTP API)
+- Parallel HTTP forwarding to CYD displays on message/clear topics
+- Local air pressure updates from Hubitat MQTT Export Integration
 
 ### System
-- **Message Profiles** - Save and recall up to 10 named sets of display attributes (0–9), usable from POST commands and the Scheduler
-- **Scheduled actions** - Trigger brightness changes, screen switches, or device reboot
+- **Message Profiles** — save and recall up to 10 named display attribute sets
+- **Scheduled actions** — brightness, screen switches, messages, reboot at absolute or sunrise/sunset-relative times
 - **Status page** with uptime and message history
-- **Persistent settings** storage (survives power cycles)
-- **mDNS support** - Access via `http://<DEVICE_NAME>.local`
-- **Web debug logging** - Real-time log viewer (if enabled)
-- **OTA firmware updates** - Update over WiFi
+- **Persistent settings** storage
+- **Device naming** — auto-named from MAC or customized via `secrets.h`
+- **mDNS** — `http://<DEVICE_NAME>.local`
+- **OTA firmware updates** — Arduino IDE network port or browser (`/update`)
+- **Web debug logging** — real-time log viewer
 
 ---
 
 ## Quick Start
 
-1. **Install required library:** In Arduino Library Manager, search for and install
-   **PubSubClient** by Nick O'Leary (version 2.8 or later). This enables the MQTT
-   subscription client that receives weather, pressure, and time from the broker.
-2. **Upload the sketch** to your ESP32-S3 device
-3. **Configure WiFi and broker IP** in `secrets.h`:
+1. Copy `secrets.h.EXAMPLE` to `secrets.h` and fill in your WiFi credentials (and any other
+   device-specific values, such as the Hubitat URL or MQTT fallback display list):
    ```cpp
-   #define WIFI_SSID        "your_network"
-   #define WIFI_PASSWORD    "your_password"
-   #define MQTT_BROKER_IP   "192.168.1.x"   // IP of the Elecrow MQTT broker
-   // Optional: local air pressure from Hubitat Maker API (averaged across sensors)
+   #define WIFI_SSID      "your_network"
+   #define WIFI_PASSWORD  "your_password"
+   // Optional: HTTP backup for local air pressure (Hubitat Maker API)
    #define HUBITAT_PRESSURE_URL "http://192.168.1.x/apps/api/NNN/devices/all?access_token=..."
+   // MQTT CYD fallback list (used only if data/displays.json is absent)
+   #define MQTT_DISPLAYS_FALLBACK R"([
+     { "name":"CYD Living Room", "messageUrl":"http://x.x.x.x/message", "clearUrl":"http://x.x.x.x/clear" }
+   ])"
    ```
    > **Location is no longer set in `secrets.h`.** After flashing, open
-   > `http://YOUR_IP/locationconfig` and enter your latitude, longitude, display name,
-   > and timezone. Defaults (San Diego, CA) are used until configured. Settings are
-   > saved to NVS and survive reboots.
-4. **Navigate to** `http://YOUR_IP` for web interface
-5. **Send a test message:**
+   > `http://YOUR_IP/locationconfig` in a browser and enter your latitude, longitude,
+   > display name, and timezone. The defaults (San Diego, CA) will be used until you
+   > configure your own values. Settings are saved to NVS and survive reboots.
+2. In Arduino IDE set `Tools → USB CDC On Boot → Disabled` before flashing.
+3. Edit `data/displays.json` with your actual CYD IP addresses.
+4. Flash the sketch via USB, then upload `data/displays.json` via `Tools → Upload LittleFS`.
+5. Configure Hubitat MQTT Export Integration to connect to the device IP on port 1883 (no credentials).
+6. Install `MQTT_Display_Publisher.groovy` as a Hubitat driver and create a virtual device using it.
+7. Send a test message:
    ```bash
    curl -X POST http://YOUR_IP/message \
      -H "Content-Type: application/json" \
      -d '{"text":"Hello World","bgcolor":"blue","textcolor":"white"}'
    ```
-6. **View the clock:**
-   ```bash
-   curl http://YOUR_IP/clock
-   ```
+
+---
+
+## Sketch Folder Structure
+
+```
+ESP32_MultiDisplay_MQTT_Broker/
+  ESP32_MultiDisplay_MQTT_Broker.ino   Main sketch
+  MQTTBroker.cpp                       MQTT broker + CYD forwarder (separate translation unit)
+  MQTTBroker.h                         MQTT broker public API
+  MQTTBroker.ino                       Bridge wrappers (no class definitions)
+  AdminHandlers.ino                    HTTP endpoint handlers
+  ClockDisplay.ino                     Clock rendering and night mode
+  ElecrowHW.ino                        Hardware abstraction (display, touch, backlight)
+  MessageEngine.ino                    Message queue, priority, effects
+  Network.ino                          WiFi, NTP, mDNS, SNR watchdog
+  Scheduler.ino                        Scheduled actions
+  Settings.ino                         NVS persistence
+  TouchInput.ino                       Touch handling and screen navigation
+  UIDrawing.ino                        Screen drawing functions
+  WeatherCalendar.ino                  Weather, calendar, local pressure fetch
+  HTML.cpp / HTML.h                    Web UI and control endpoint handlers
+  HelpFunctions.cpp / HelpFunctions.h  JSON helpers, color parsing, utilities
+  AstroCalc.cpp / AstroCalc.h          Astronomical calculations
+  PSRAM_Helpers.h                      PSRAMCanvas and RGBPanelGFXBridge
+  WebDebugLog.cpp / WebDebugLog.h      Web debug logging
+  RobotoFonts.h                        Roboto font data
+  Colors.h                             Color constants
+  DeviceInfo.h                         Device identity helpers
+  User_Setup.h                         All configuration constants
+  secrets.h                            WiFi credentials, MQTT fallback (not in repo)
+  secrets.h.EXAMPLE                    Template — copy to secrets.h and set WiFi credentials
+  secrets.h.EXAMPLE                    Template for secrets.h
+  partitions.csv                       Custom 16MB partition layout
+  data/
+    displays.json                      CYD display registry (uploaded to LittleFS)
+```
+
+> **Why MQTTBroker.cpp instead of .ino?**
+> Arduino IDE's prototype generator scans all `.ino` files and generates forward declarations for cross-file function calls. A class definition that inherits from an external library type (`sMQTTBroker`) in a `.ino` file defeats the generator, causing cascade "not declared" errors for every function in the entire sketch. Moving the class to a `.cpp` file (compiled as a separate translation unit, never processed by the generator) resolves this. `MQTTBroker.ino` contains only simple wrapper functions with no class definitions.
 
 ---
 
 ## Web Interface
 
-Access the device via web browser:
-
-- **`http://YOUR_IP/`** - Interactive message form + quick reference
-- **`http://YOUR_IP/status`** - Device status & message history
-- **`http://YOUR_IP/logs`** - Real-time debug logs (if enabled)
-- **`http://YOUR_IP/clockconfig`** - Clock configuration page
-- **`http://YOUR_IP/locationconfig`** - Location & timezone configuration
-- **`http://YOUR_IP/control`** - Device controls
-
-### MQTT Data Client
-
-Each CYD subscribes to three retained MQTT topics published by the Elecrow broker:
-
-| Topic | Data received |
-|-------|---------------|
-| `multidisplay/weather` | Current conditions + daily forecast (replaces Open-Meteo HTTP fetch) |
-| `multidisplay/pressure` | Local air pressure from Hubitat (replaces direct Hubitat HTTP fetch) |
-| `multidisplay/time` | UTC epoch + POSIX TZ string (broker RTC backup when internet is down) |
-
-**Fallback behavior:** If the broker goes offline or a topic goes stale, the CYD
-automatically falls back to its own HTTP fetches — no manual intervention needed.
-The transition is seamless in both directions.
-
-**Temperature unit:** The broker and all CYDs must use the same temperature unit
-(Celsius or Fahrenheit). A unit mismatch causes the CYD to skip the MQTT weather
-payload and use its own HTTP fetch instead.
-
-**Status:** The `/status` page shows the current MQTT broker connection state.
-
-**mDNS Access:**
-If configured, you can also use: `http://Display35-1.local` (replace with your device name)
-
-**Note:** mDNS may not work in some automation platforms like Hubitat Rule Machine. Use the IP address instead.
-
-### Root Page — JSON & GET Preview
-
-The root page (`/`) includes a **live JSON and GET preview** panel below the message form. As you fill in the form fields (text, colors, font, scroll, effects, etc.), both preview boxes update automatically to show exactly what the resulting API call will look like:
-
-- **JSON preview** — a ready-to-copy JSON body for `POST /message`
-- **GET preview** — a ready-to-copy query string for `GET /message?...`
-
-Each preview has a **Copy** button. Only non-default values appear in the output, keeping the previews concise. This makes it easy to capture the exact parameters for use in Hubitat Rule Machine or any other HTTP client without manually constructing the payload.
+- **`http://YOUR_IP/`** — interactive message form + quick reference + live JSON/GET preview
+- **`http://YOUR_IP/status`** — device status & message history
+- **`http://YOUR_IP/clockconfig`** — clock configuration
+- **`http://YOUR_IP/locationconfig`** — location & timezone configuration
+- **`http://YOUR_IP/control`** — device controls
+- **`http://YOUR_IP/update`** — OTA firmware update
+- **`http://YOUR_IP/logs`** — real-time debug logs (if enabled)
 
 ---
 
@@ -207,11 +241,11 @@ Each preview has a **Copy** button. Only non-default values appear in the output
 | `/msg` | GET | Simple message (query params only) |
 | `/clear` | GET/POST | Clear messages, show clock |
 | `/clock` | GET/POST | Navigate to clock screen |
-| `/clockstart` | GET/POST | Navigate to clock (alias) |
 | `/clockconfig` | GET/POST | Configure clock settings |
 | `/locationconfig` | GET/POST | Configure location & timezone |
 | `/weather` | GET/POST | Navigate to weather screen |
 | `/calendar` | GET/POST | Navigate to calendar screen |
+| `/astro` | GET/POST | Navigate to Astro screen |
 | `/schedules` | GET/POST | Configure scheduled actions |
 | `/control` | GET/POST | Universal control endpoint |
 | `/status` | GET | Device status (HTML) |
@@ -219,62 +253,55 @@ Each preview has a **Copy** button. Only non-default values appear in the output
 | `/time` | GET | Current time |
 | `/logs` | GET | Debug logs (if enabled) |
 | `/otapassword` | GET/POST | OTA password configuration |
-| `/reboot` | GET/POST | Reboot device (keep settings) |
+| `/reboot` | GET/POST | Reboot device |
 | `/resetsettings` | GET/POST | Reset settings + reboot |
-| `/resetdevice` | GET/POST | Reset settings + reboot (immediate) |
+| `/resetdevice` | GET/POST | Reset settings + reboot (alias) |
 | `/update` | GET/POST | OTA firmware update |
-| `/testinject` | GET/POST | Inject test state for night mode testing (requires `ENABLE_TEST_MODE true` in `User_Setup.h`; **disabled by default**) |
+
+### MQTT Data Broadcast Topics
+
+After each successful fetch, the broker publishes retained messages on three topics.
+CYD devices subscribe to receive live data without making their own internet or LAN requests.
+
+| Topic | Retained | Published when | Payload |
+|-------|----------|---------------|---------|
+| `multidisplay/weather` | Yes | After each Open-Meteo fetch (~10 min) | JSON — temp, apparent temp, humidity, surface pressure, weather code, daily forecast, celsius flag, unix timestamp |
+| `multidisplay/pressure` | Yes | After each Hubitat pressure fetch/receive | `{"hpa": 1013.2}` |
+| `multidisplay/time` | Yes | Every 60 seconds | `{"epoch": 1234567890, "tz": "PST8PDT,M3.2.0,M11.1.0"}` |
+
+CYDs fall back to their own HTTP fetches automatically if a topic goes stale (broker offline, WiFi interrupted). No configuration is needed on the broker side beyond normal operation.
 
 ---
 
 ### Message Endpoints
 
-#### `/message` - Main Message API
+#### `/message` — Main Message API
 
-**Send a message via JSON POST:**
 ```bash
 curl -X POST http://YOUR_IP/message \
   -H "Content-Type: application/json" \
-  -d '{
-    "text": "Hello World",
-    "bgcolor": "blue",
-    "textcolor": "white",
-    "font": 24,
-    "expirationtime": 30
-  }'
+  -d '{"text":"Hello World","bgcolor":"blue","textcolor":"white","font":36,"expirationtime":30}'
 ```
-
-**Send a message via GET:**
-```bash
-curl "http://YOUR_IP/message?text=Hello&bgcolor=blue&textcolor=white"
-```
-
-#### `/msg` — Simple Message (GET only)
-Compatibility endpoint accepting query parameters only. Same parameters as `/message` GET.
-
----
-
-### Message JSON
 
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
-| `text` | string | — | Message text to display |
+| `text` | string | — | Message text |
 | `bgcolor` | string | `"white"` | Background color (named or #RRGGBB) |
-| `textcolor` | string | `"black"` | Text color (named or #RRGGBB) |
-| `font` | int | `30` | Font size in points (see [Font Guide](#font-guide)) |
-| `rotation` | int | `0` | Rotation: 0, 90, 180, 270 |
-| `halign` | string | `"center"` | Horizontal alignment: left/center/right |
-| `valign` | string | `"middle"` | Vertical alignment: top/middle/bottom |
+| `textcolor` | string | `"black"` | Text color |
+| `font` | int | `30` | Font size (see [Font Guide](#font-guide)) |
+| `rotation` | int | `0` | 0, 90, 180, 270 |
+| `halign` | string | `"center"` | left / center / right |
+| `valign` | string | `"middle"` | top / middle / bottom |
 | `wrap` | bool | `true` | Enable text wrapping |
-| `brightness` | int | `255` | Message brightness 0–255 |
-| `expirationtime` | int | `0` | Seconds until auto-return to clock (0 = no expiration) |
-| `priority` | string | `"normal"` | Priority: normal or high |
-| `scrolldir` | string | `"none"` | Scroll direction: none/left/right/up/down |
-| `scrollspeed` | int | `3` | Scroll speed 1 (slow) to 9 (fast) |
-| `flash` | bool | `false` | Enable flash effect (swaps bg/text colors) |
-| `flashinterval` | int | `1000` | Flash interval in ms (500–60000) |
-| `pulse` | bool | `false` | Enable pulse brightness effect |
-| `pulseduration` | int | `2000` | Pulse cycle duration in ms (500–600000) |
+| `brightness` | int | `5` | 0–5 |
+| `expirationtime` | int | `0` | Seconds until auto-return to clock (0 = no expiry) |
+| `priority` | string | `"normal"` | normal / high |
+| `scrolldir` | string | `"none"` | none / left / right / up / down |
+| `scrollspeed` | int | `3` | 1 (slow) – 9 (fast) |
+| `flash` | bool | `false` | Flash effect |
+| `flashinterval` | int | `1000` | Flash interval ms (500–60000) |
+| `pulse` | bool | `false` | Pulse brightness effect |
+| `pulseduration` | int | `2000` | Pulse cycle ms (500–600000) |
 | `retrieveprofile` | int | — | Apply saved profile 0–9 before other params |
 | `saveprofile` | int | — | Save current params to profile 0–9 |
 | `clearprofile` | int | — | Clear saved profile 0–9 |
@@ -283,155 +310,74 @@ Compatibility endpoint accepting query parameters only. Same parameters as `/mes
 
 ### Message Profiles
 
-Save and recall up to 10 sets of display attributes (profiles 0–9). Profiles persist across reboots.
+Save and recall up to 10 sets of display attributes (profiles 0–9). Persist across reboots.
 
-**Save a profile (with a message):**
 ```json
 POST /message
-{
-  "text": "Alert!",
-  "bgcolor": "red",
-  "textcolor": "white",
-  "font": 36,
-  "saveprofile": 0
-}
+{ "bgcolor":"red","textcolor":"white","font":48,"flash":true,"saveprofile":1 }
 ```
-
-**Save a profile (no message — just stores the profile):**
 ```json
 POST /message
-{
-  "bgcolor": "red",
-  "textcolor": "white",
-  "font": 36,
-  "saveprofile": 0
-}
-```
-
-**Use a saved profile:**
-```json
-POST /message
-{
-  "text": "Motion detected",
-  "retrieveprofile": 0
-}
-```
-
-**Clear a profile:**
-```json
-POST /message
-{"clearprofile": 0}
+{ "text":"Water Leak","retrieveprofile":1,"priority":"high" }
 ```
 
 ---
 
 ### Clock Configuration
 
-#### `GET /clockconfig` — Configuration Page
-
-Returns the interactive HTML clock configuration page.
-
-#### `POST /clockconfig` — Save Clock Settings
-
-Accepts JSON or form POST.
-
-**Clock Configuration JSON fields:**
+`POST /clockconfig` accepts JSON with any combination of:
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `timeformat` | string | strftime format for time (e.g. `"%l:%M %P"`) |
-| `dateformat` | string | strftime format for date (e.g. `"%A  %Y-%m-%d"`) |
-| `timefont` | int | Font size for time display |
-| `datefont` | int | Font size for date display |
+| `dateformat` | string | strftime format for date |
+| `timefont` | int | Time font size |
+| `datefont` | int | Date font size |
 | `timecolor` | string | Time text color |
 | `datecolor` | string | Date text color |
 | `bgcolor` | string | Clock background color |
-| `clksuntimescolor` | string | Sunrise/sunset text color on clock |
-| `nighttimecolor` | string | Time text color during night mode |
-| `nightdatecolor` | string | Date text color during night mode |
-| `nightbgcolor` | string | Background color during night mode |
+| `clksuntimescolor` | string | Sunrise/sunset color on clock |
+| `nighttimecolor` | string | Time color during night mode |
+| `nightdatecolor` | string | Date color during night mode |
+| `nightbgcolor` | string | Background during night mode |
 | `nightsuntimescolor` | string | Suntimes color during night mode |
-| `labelfont` | int | Font for screen labels |
-| `msgnoticefont` | int | Font for message notices/history |
-| `weathertempfnt` | int | Font for weather temperature |
-| `weatherhumfnt` | int | Font for weather humidity |
-| `weatherpresfnt` | int | Font for weather pressure |
+| `labelfont` | int | Screen label font |
+| `msgnoticefont` | int | Message notice font |
+| `weathertempfnt` | int | Weather temperature font |
+| `weatherhumfnt` | int | Weather humidity font |
+| `weatherpresfnt` | int | Weather pressure font |
 | `labelcolor` | string | Label text color |
-| `msgnoticecolor` | string | Message notice text color |
-| `rotation` | int | Screen rotation: 0, 90, 180, 270 |
-| `brightness` | int | Screen brightness 0–255 |
-| `screensaverdim` | int | Screensaver brightness 0–255 |
-| `screensavertimeout` | int | Screensaver timeout in ms (0 = disabled) |
-| `clockenable` | bool | Enable/disable the clock |
-| `clksuntimesenabled` | bool | Show sunrise/sunset times on clock |
-| `nightmodeenable` | bool | Enable night mode auto-dimming |
-| `nightbrightness` | int | Night mode quiescent brightness 0–255 |
-| `daybrightness` | int | Night mode touch-wake brightness 0–255 |
-| `nightwakedur` | int | Touch-wake duration in seconds |
+| `msgnoticecolor` | string | Message notice color |
+| `rotation` | int | Screen rotation: 0/90/180/270 |
+| `brightness` | int | Screen brightness 0–5 |
+| `screensaverdim` | int | Screensaver brightness 0–5 |
+| `screensavertimeout` | int | Screensaver timeout ms (0 = disabled) |
+| `clockenable` | bool | Enable/disable clock |
+| `clksuntimesenabled` | bool | Show sunrise/sunset on clock |
+| `nightmodeenable` | bool | Enable auto-dim night mode |
+| `nightbrightness` | int | Night quiescent brightness 0–5 |
+| `daybrightness` | int | Night touch-wake brightness 0–5 |
+| `nightwakedur` | int | Touch-wake duration seconds |
 | `sunsetoffset` | int | Minutes offset from sunset (negative = before) |
-| `sunriseoffset` | int | Minutes offset from sunrise (negative = before) |
+| `sunriseoffset` | int | Minutes offset from sunrise |
 | `tempcelsius` | bool | Display temperature in Celsius |
 
 ---
 
 ### Schedules
 
-Up to 10 scheduled actions (0–9). Persisted across reboots.
+Up to 10 scheduled actions (slots 0–9), persisted across reboots.
 
-#### Supported Actions
+**Actions:** `brightness`, `clock`, `weather`, `calendar`, `message`, `reboot`
 
-| Action | Description |
-|--------|-------------|
-| `brightness` | Set screen brightness |
-| `clock` | Switch to clock screen |
-| `weather` | Switch to weather screen |
-| `calendar` | Switch to calendar screen |
-| `message` | Display a message |
-| `reboot` | Reboot the device |
+**Timing modes:**
+- `"absolute"` — fires at a fixed time daily (`hour`, `minute`)
+- `"relative"` — fires offset from `"sunrise"` or `"sunset"` (`offset` in minutes, negative = before)
 
-#### Timing Modes
-
-**Absolute** — fires at a fixed time each day:
 ```json
-{"mode": "absolute", "hour": 22, "minute": 0}
+POST /schedules
+{ "index":0,"enabled":true,"mode":"relative","reference":"sunset","offset":-30,"action":"brightness","brightness":3 }
 ```
-
-**Relative** — fires offset from sunrise or sunset:
-```json
-{"mode": "relative", "reference": "sunset", "offset": -30}
-```
-`offset` is in minutes; negative = before the reference time.
-
-#### `POST /schedules` — Update a Schedule
-
-```bash
-curl -X POST http://YOUR_IP/schedules \
-  -H "Content-Type: application/json" \
-  -d '{
-    "index": 0,
-    "enabled": true,
-    "mode": "absolute",
-    "hour": 22,
-    "minute": 0,
-    "action": "brightness",
-    "brightness": 80
-  }'
-```
-
-**Schedule JSON fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `index` | int | Schedule slot 0–9 |
-| `enabled` | bool | Enable/disable this schedule |
-| `mode` | string | `"absolute"` or `"relative"` |
-| `hour` | int | Hour (0–23) for absolute mode |
-| `minute` | int | Minute (0–59) for absolute mode |
-| `reference` | string | `"sunrise"` or `"sunset"` for relative mode |
-| `offset` | int | Minutes offset (±) for relative mode |
-| `action` | string | Action to perform (see table above) |
-| `brightness` | int | Target brightness 0–255 (for brightness action) |
-| `message` | string | Message text (for message action) |
 
 ---
 
@@ -439,7 +385,7 @@ curl -X POST http://YOUR_IP/schedules \
 
 `POST /control` (JSON) or `GET /control?param=value`
 
-#### Boolean Settings (POST JSON or GET with `true`/`false`/`toggle`)
+#### Boolean / Toggle Settings
 
 | Key | Description |
 |-----|-------------|
@@ -449,89 +395,277 @@ curl -X POST http://YOUR_IP/schedules \
 | `menudark` | Menu dark mode |
 | `historydark` | Message history dark mode |
 | `astrodark` | Astro screen dark mode |
-| `pixelshift` | Pixel shift (anti burn-in) |
-| `touchenable` | Enable/disable touch input |
-| `weathercycle` | Auto-cycle to weather screen |
-| `calendarcycle` | Auto-cycle to calendar screen |
-| `clockenable` | Enable/disable the clock |
+| `pixelshift` | Pixel shift anti burn-in |
+| `touchenable` | Touch input enable |
+| `weathercycle` | Auto-cycle to weather |
+| `calendarcycle` | Auto-cycle to calendar |
+| `clockenable` | Clock enable |
 | `normoverride` | Normal message override mode |
+
+Values: `true`, `false`, or `"toggle"`.
 
 #### Numeric Settings
 
-| Key | Type | Description |
+| Key | Unit | Description |
 |-----|------|-------------|
-| `wxshowdur` | int (sec) | Weather screen display duration |
-| `wxcycleint` | int (sec) | Weather cycle interval |
-| `calshowdur` | int (sec) | Calendar screen display duration |
-| `calcycleint` | int (sec) | Calendar cycle interval |
-| `hpalternate` | int (sec) | High-priority message alternation interval |
-| `normoverridedur` | int (sec) | Normal override duration |
-| `pulsemaxbri` | int 0–255 | Pulse effect maximum brightness |
-| `pulseminbri` | int 0–255 | Pulse effect minimum brightness |
-| `maxmsgage` | int (hours) | Max message history age (0 = disabled) |
-| `localpressure` | int (hPa) | Push a local air pressure reading (800–1200 hPa). Updates the weather screen immediately if it is currently shown. |
+| `wxshowdur` | seconds | Weather screen display duration |
+| `wxcycleint` | seconds | Weather cycle interval |
+| `calshowdur` | seconds | Calendar display duration |
+| `calcycleint` | seconds | Calendar cycle interval |
+| `hpalternate` | seconds | High-priority alternation interval |
+| `normoverridedur` | seconds | Normal override duration |
+| `pulsemaxbri` | 0–5 | Pulse maximum brightness |
+| `pulseminbri` | 0–5 | Pulse minimum brightness |
+| `maxmsgage` | hours | Max message history age (0 = disabled) |
+| `localpressure` | hPa int | Push local air pressure reading (800–1200) |
 
 #### Temperature Display
 
 | Key | Value | Description |
 |-----|-------|-------------|
 | `tempactual` | `true` | Show actual temperature |
-| `tempactual` | `false` | Show apparent (feels-like) temperature |
-| `tempactual` | `"alternate"` | Alternate between actual and apparent |
+| `tempactual` | `false` | Show apparent temperature |
+| `tempactual` | `"alternate"` | Alternate actual and apparent |
 
 #### Navigation
 
-| Key | Value | Description |
-|-----|-------|-------------|
-| `clock` | `true` | Switch to clock screen |
-| `weather` | `true` | Switch to weather screen |
-| `calendar` | `true` | Switch to calendar screen |
+```json
+{ "clock":true }    { "weather":true }    { "calendar":true }
+```
 
 #### History / Messaging
 
-| Key | Value | Description |
-|-----|-------|-------------|
-| `clear` | `true` | Clear all messages and queue |
-| `clearhistory` | `true` | Clear message history only |
+```json
+{ "clear":true }    { "clearhistory":true }
+```
 
 #### Clock Reset
 
-| Key | Value | Description |
-|-----|-------|-------------|
-| `clockresetcolors` | `"dark"` or `"light"` | Reset clock colors to default palette |
-| `clockresetall` | `"dark"` or `"light"` | Reset all clock settings to defaults |
+```json
+{ "clockresetcolors":"dark" }    { "clockresetall":"light" }
+```
 
 #### System
 
-| Key | Value | Description |
-|-----|-------|-------------|
-| `reboot` | `true` | Reboot device (keeps settings) |
-| `resetsettings` | `true` | Clear settings and reboot |
-| `resetdevice` | `true` | Clear settings and reboot (alias) |
+```json
+{ "reboot":true }    { "resetsettings":true }    { "resetdevice":true }
+```
 
 ---
 
 ### System Management
 
-#### `/reboot` — Reboot Device
 ```bash
 curl http://YOUR_IP/reboot
-```
-
-#### `/resetsettings` — Reset All Settings
-```bash
 curl -X POST http://YOUR_IP/resetsettings
 ```
 
-#### `/update` — OTA Firmware Update (Web)
-Navigate to `http://YOUR_IP/update` in a browser to upload a new firmware `.bin` file.
+OTA: navigate to `http://YOUR_IP/update` in a browser and upload a `.bin` file.
 
-#### `/otapassword` — Set OTA Password
-```bash
-curl -X POST http://YOUR_IP/otapassword \
-  -H "Content-Type: application/json" \
-  -d '{"password": "mypassword"}'
+---
+
+## MQTT Reference
+
+### Broker Details
+
+| Property | Value |
+|----------|-------|
+| Protocol | MQTT 3.1.1 |
+| Port | 1883 (plain TCP) |
+| Credentials | None required |
+| Max clients | ~20–30 simultaneous (limited by ESP32-S3 PSRAM heap) |
+| Persistence | None — subscriptions and retained messages are not stored across reboots |
+
+The broker is **general-purpose**. Topics other than `display/*` and `device/*` pass through to subscribers without triggering any local action. Any standard MQTT client (MQTT Explorer, Node-RED, Home Assistant, PubSubClient, etc.) can connect and use arbitrary topics.
+
+### Topic Routing
+
+| Topic | Direction | Description |
+|-------|-----------|-------------|
+| `display/message` | → broker | Display locally + forward to all CYDs |
+| `display/clear` | → broker | Clear locally + forward clear to all CYDs |
+| `display/message/elecrow` | → broker | Display locally only |
+| `display/message/cyd` | → broker | Forward to all CYDs only |
+| `display/message/device/<name>` | → broker | Forward to one named CYD |
+| `display/clear/device/<name>` | → broker | Clear one named CYD |
+| `display/screen` | → broker | Navigate to a screen |
+| `device/control` | → broker | Control commands (JSON) |
+| `device/clockconfig` | → broker | Clock configuration (JSON) |
+| `hubitat/<uuid>/devices/<id>` | → broker | Hubitat device state (from MQTT Export Integration) |
+
+### Display Message Topics
+
+The message payload is the same JSON format accepted by `POST /message`:
+
+```json
+{
+  "text": "Motion detected",
+  "bgcolor": "red",
+  "textcolor": "white",
+  "font": 36,
+  "priority": "high",
+  "expirationtime": 30
+}
 ```
+
+Plain text payloads are also accepted and displayed as-is with default styling.
+
+**Topic | Effect:**
+- `display/message` — shows on this display + sends to all CYDs in parallel
+- `display/message/elecrow` — shows on this display only
+- `display/message/cyd` — sends to all CYDs only (no local display)
+- `display/message/device/CYD Bookcase` — sends to that one CYD only
+
+> **Note:** The device name in the topic must exactly match the `"name"` field in `displays.json` including capitalisation and any underscores.
+
+**Clear topics:**
+- `display/clear` — clears this display + all CYDs
+- `display/clear/device/CYD Garage` — clears one CYD only
+
+### Screen Navigation Topics
+
+Publish to `display/screen` with a plain text payload:
+
+```
+display/screen   →   weather
+display/screen   →   calendar
+display/screen   →   clock
+```
+
+### Device Control Topics
+
+`device/control` accepts the same JSON keys as `POST /control`:
+
+```json
+{ "clockdark": "toggle" }
+{ "pixelshift": true, "maxmsgage": 24 }
+{ "reboot": true }
+{ "weather": true }
+{ "clearhistory": true }
+{ "localpressure": 1013 }
+```
+
+`device/clockconfig` accepts the same JSON keys as `POST /clockconfig`:
+
+```json
+{ "timefont": 60, "timecolor": "#00FFFF", "nightmodeenable": true }
+```
+
+### Hubitat Integration Topics
+
+When Hubitat's **MQTT Export Integration** is connected to this broker, it publishes device states to:
+
+```
+hubitat/<hub-uuid>/devices/<device-id>
+```
+
+The payload is a JSON object containing the device's full attribute list. Example for a pressure sensor (device 1024):
+
+```json
+{
+  "id": 1024,
+  "name": "VD Air Pressure Average",
+  "attributes": [
+    { "name": "pressure", "value": "1013.2", "unit": "hPa" },
+    ...
+  ]
+}
+```
+
+The broker's `onEvent()` handler extracts the `pressure` attribute value and updates the local pressure display automatically. **No Hubitat rule is required** — publishing happens automatically whenever the device's pressure attribute changes.
+
+**Setup:**
+1. In Hubitat go to **Integrations → Add Built-In Integration → MQTT Export Integration**
+2. Disable "Use built-in MQTT service"
+3. Set host to the device IP, port 1883, no credentials
+4. Add your pressure sensor to the **read only devices** list
+5. Set `HUBITAT_PRESSURE_DEVICE_ID` in `User_Setup.h` to match the Hubitat device ID
+6. Save and reconnect
+
+> **Beta note:** The MQTT Export Integration may publish `homeassistant/` discovery topics even when that option is disabled (known Hubitat beta bug). These are filtered out silently by the sketch and have no effect.
+
+### Hubitat MQTT Display Publisher Driver
+
+`MQTT_Display_Publisher.groovy` is a Hubitat virtual device driver that publishes display messages and control commands to this broker. Install it via **Drivers Code → New Driver**, create a virtual device using it, and configure it with the broker IP.
+
+**Rule Machine commands:**
+- `publishMessage(body)` — publish JSON to `display/message` (all displays)
+- `publishClear()` — publish to `display/clear`
+- `publishToGroup(group, body)` — publish to `display/message/elecrow` or `display/message/cyd`
+- `publishControl(json)` — publish to `device/control`
+
+---
+
+## CYD Display Forwarding
+
+When a message arrives on `display/message` or `display/clear`, the broker spawns one FreeRTOS task per configured CYD display. All HTTP POSTs fire simultaneously — latency is determined by the slowest single display, not the sum.
+
+**Retry behaviour:** 3 total attempts per display (initial + 2 retries), 500ms between retries. HTTP 2xx and 3xx responses are treated as success (some CYD sketches respond to `/clear` with a 303 redirect).
+
+### displays.json
+
+Stored in the `data/` folder and uploaded to LittleFS. Edit this file and re-upload via LittleFS uploader to change CYD addresses without reflashing.
+
+```json
+[
+  { "name":"CYD_Bookcase",
+    "messageUrl":"http://192.168.1.78/message",
+    "clearUrl":  "http://192.168.1.78/clear" },
+  { "name":"CYD_Closet",
+    "messageUrl":"http://192.168.1.79/message",
+    "clearUrl":  "http://192.168.1.79/clear" },
+  { "name":"CYD_Garage",
+    "messageUrl":"http://192.168.1.70/message",
+    "clearUrl":  "http://192.168.1.70/clear" },
+  { "name":"CYD_Desk",
+    "messageUrl":"http://192.168.1.71/message",
+    "clearUrl":  "http://192.168.1.71/clear" }
+]
+```
+
+> **Important:** The file must be a valid JSON array — it must start with `[` and end with `]`. If the file is absent or invalid, the fallback list from `MQTT_DISPLAYS_FALLBACK` in `secrets.h` is used.
+
+If `displays.json` is not present on LittleFS, the `MQTT_DISPLAYS_FALLBACK` constant defined in `secrets.h` is used. If that is also absent, a single-entry emergency fallback defined in `MQTTBroker.cpp` is used. The Serial Monitor reports which source loaded at boot.
+
+### LittleFS Upload
+
+To update `displays.json` without reflashing:
+
+1. Install the **arduino-littlefs-upload** plugin from `https://github.com/earlephilhower/arduino-littlefs-upload/releases` — place the `.vsix` file in `C:\Users\<you>\.arduinoIDE\plugins\` and restart Arduino IDE
+2. Edit `data/displays.json`
+3. Close the Serial Monitor
+4. Press **Ctrl+Shift+P** → **Upload LittleFS to Pico/ESP8266/ESP32**
+
+---
+
+## Local Air Pressure
+
+Local air pressure is displayed on the weather screen alongside the Open-Meteo model estimate.
+
+**Display convention:**
+- `1013.2 hPa` — local sensor reading (no prefix)
+- `~1012.8 hPa` — Open-Meteo model estimate (`~` prefix)
+- Alternates between local and Open-Meteo every few seconds (configurable)
+
+**Primary source — MQTT (event-driven):**
+Hubitat MQTT Export Integration publishes attribute changes for the pressure virtual device. The broker receives the update immediately and refreshes the weather screen if it is currently displayed.
+
+**Backup source — HTTP Maker API (polled):**
+`HUBITAT_PRESSURE_URL` in `secrets.h` defines a Hubitat Maker API endpoint that returns:
+```json
+{ "hpa": 1013.5, "sensors": 2, "age_seconds": 30 }
+```
+This is polled every 30 minutes, but only fires if MQTT hasn't delivered a fresh reading recently. When MQTT delivers a value, the 30-minute timer resets.
+
+**Push from Hubitat rule:**
+A pressure value can also be pushed at any time via `device/control`:
+```json
+{ "localpressure": 1013 }
+```
+Or via HTTP: `POST /control {"localpressure": 1013}`
+
+**Boot behaviour:**
+At boot, `fetchWeather()` runs immediately. If Hubitat hasn't yet reconnected to the broker (typically takes 10–30 seconds after broker restart), the weather screen shows Open-Meteo pressure with the `~` prefix. When MQTT delivers the local pressure, the weather screen refreshes automatically if it is currently visible.
 
 ---
 
@@ -547,8 +681,8 @@ POST /control
   "pixelshift": true,
   "wxshowdur": 15,
   "wxcycleint": 300,
-  "pulsemaxbri": 255,
-  "pulseminbri": 64,
+  "pulsemaxbri": 5,
+  "pulseminbri": 2,
   "maxmsgage": 24,
   "tempactual": "alternate"
 }
@@ -565,7 +699,7 @@ POST /schedules
   "reference": "sunset",
   "offset": 0,
   "action": "brightness",
-  "brightness": 80
+  "brightness": 3
 }
 ```
 
@@ -573,17 +707,17 @@ POST /schedules
 
 ## GET Format Reference
 
-Most parameters available via JSON POST can also be sent as GET query parameters:
+Most POST parameters are also accepted as GET query params:
 
 ```
-GET /message?text=Hello&bgcolor=blue&textcolor=white&font=24&expirationtime=30
+GET /message?text=Hello&bgcolor=blue&font=36&expirationtime=30
 GET /control?clockdark=true&pixelshift=toggle
-GET /clockconfig?brightness=200&nightmodeenable=true
+GET /clockconfig?brightness=5&nightmodeenable=true
 ```
 
-Named colors: `red`, `green`, `blue`, `white`, `black`, `yellow`, `cyan`, `magenta`, `orange`, `purple`, `pink`, `brown`, `gray`, `lightgray`, `darkgray`, `dark_green`
+**Named colors:** `red`, `green`, `blue`, `white`, `black`, `yellow`, `cyan`, `magenta`, `orange`, `purple`, `pink`, `brown`, `gray`, `lightgray`, `darkgray`, `dark_green`
 
-Hex colors: `#RRGGBB` (e.g. `#FF8800`)
+**Hex colors:** `#RRGGBB` (e.g. `#FF8800`)
 
 ---
 
@@ -591,272 +725,98 @@ Hex colors: `#RRGGBB` (e.g. `#FF8800`)
 
 ### Message Examples
 
-**Simple centered message:**
 ```bash
+# Simple centered message with expiry
 curl -X POST http://YOUR_IP/message \
   -H "Content-Type: application/json" \
-  -d '{"text":"Doorbell","bgcolor":"orange","textcolor":"black","font":36,"expirationtime":10}'
-```
+  -d '{"text":"Doorbell","bgcolor":"orange","textcolor":"black","font":48,"expirationtime":10}'
 
-**Scrolling message:**
-```bash
+# Scrolling ticker
 curl -X POST http://YOUR_IP/message \
   -H "Content-Type: application/json" \
-  -d '{"text":"Breaking news ticker scrolling left","scrolldir":"left","scrollspeed":4}'
-```
+  -d '{"text":"Breaking news scrolling left","scrolldir":"left","scrollspeed":4}'
 
-**Flashing alert:**
-```bash
+# High-priority flashing alert
 curl -X POST http://YOUR_IP/message \
   -H "Content-Type: application/json" \
-  -d '{"text":"ALERT","bgcolor":"red","textcolor":"white","flash":true,"flashinterval":500,"priority":"high"}'
+  -d '{"text":"SMOKE ALARM","bgcolor":"red","textcolor":"white","flash":true,"flashinterval":500,"priority":"high"}'
 ```
 
-**Pulsing notification:**
-```bash
-curl -X POST http://YOUR_IP/message \
-  -H "Content-Type: application/json" \
-  -d '{"text":"Package Arrived","pulse":true,"pulseduration":3000}'
+### MQTT Examples (via MQTT Explorer or any MQTT client)
+
 ```
+Topic:   display/message
+Payload: {"text":"Front door opened","bgcolor":"blue","textcolor":"white","expirationtime":15}
 
-**High-priority message (persists until dismissed):**
-```bash
-curl -X POST http://YOUR_IP/message \
-  -H "Content-Type: application/json" \
-  -d '{"text":"Smoke Alarm","bgcolor":"red","textcolor":"white","priority":"high"}'
-```
+Topic:   display/screen
+Payload: weather
 
-### Message Profile Examples
+Topic:   device/control
+Payload: {"clockdark":"toggle"}
 
-**Save alert profile:**
-```bash
-curl -X POST http://YOUR_IP/message \
-  -H "Content-Type: application/json" \
-  -d '{"bgcolor":"red","textcolor":"white","font":36,"flash":true,"flashinterval":500,"saveprofile":1}'
-```
+Topic:   device/control
+Payload: {"reboot":true}
 
-**Use alert profile:**
-```bash
-curl -X POST http://YOUR_IP/message \
-  -H "Content-Type: application/json" \
-  -d '{"text":"Water Leak Detected","retrieveprofile":1,"priority":"high"}'
-```
+Topic:   display/message/device/CYD_Bookcase
+Payload: {"text":"Garage door open","bgcolor":"orange","textcolor":"black"}
 
-### Clock Examples
-
-**Set time font and color:**
-```bash
-curl -X POST http://YOUR_IP/clockconfig \
-  -H "Content-Type: application/json" \
-  -d '{"timefont":48,"timecolor":"#00FFFF","datefont":16,"datecolor":"white"}'
-```
-
-**Enable night mode:**
-```bash
-curl -X POST http://YOUR_IP/clockconfig \
-  -H "Content-Type: application/json" \
-  -d '{"nightmodeenable":true,"nightbrightness":80,"daybrightness":160,"sunsetoffset":-30,"sunriseoffset":15}'
-```
-
-**Set 24-hour time format:**
-```bash
-curl -X POST http://YOUR_IP/clockconfig \
-  -H "Content-Type: application/json" \
-  -d '{"timeformat":"%H:%M","dateformat":"%A  %Y-%m-%d"}'
-```
-
-### Control Examples
-
-**Toggle dark mode on clock:**
-```bash
-curl -X POST http://YOUR_IP/control \
-  -H "Content-Type: application/json" \
-  -d '{"clockdark":true}'
-```
-
-**Set all screens to dark mode:**
-```bash
-curl -X POST http://YOUR_IP/control \
-  -H "Content-Type: application/json" \
-  -d '{"clockdark":true,"weatherdark":true,"calendardark":true,"menudark":true,"historydark":true,"astrodark":true}'
-```
-
-**Navigate to weather:**
-```bash
-curl -X POST http://YOUR_IP/control \
-  -H "Content-Type: application/json" \
-  -d '{"weather":true}'
-```
-
-**Clear message history:**
-```bash
-curl -X POST http://YOUR_IP/control \
-  -H "Content-Type: application/json" \
-  -d '{"clearhistory":true}'
-```
-
-**Reset clock to dark mode defaults:**
-```bash
-curl -X POST http://YOUR_IP/control \
-  -H "Content-Type: application/json" \
-  -d '{"clockresetcolors":"dark"}'
+Topic:   display/clear/device/CYD_Desk
+Payload: (any or empty)
 ```
 
 ### Schedules Examples
 
-**Dim at 10pm (absolute):**
 ```bash
+# Dim at 10pm
 curl -X POST http://YOUR_IP/schedules \
   -H "Content-Type: application/json" \
-  -d '{"index":0,"enabled":true,"mode":"absolute","hour":22,"minute":0,"action":"brightness","brightness":80}'
-```
+  -d '{"index":0,"enabled":true,"mode":"absolute","hour":22,"minute":0,"action":"brightness","brightness":3}'
 
-**Brighten at 7am (absolute):**
-```bash
+# Brighten at sunrise
 curl -X POST http://YOUR_IP/schedules \
   -H "Content-Type: application/json" \
-  -d '{"index":1,"enabled":true,"mode":"absolute","hour":7,"minute":0,"action":"brightness","brightness":200}'
-```
+  -d '{"index":1,"enabled":true,"mode":"relative","reference":"sunrise","offset":0,"action":"brightness","brightness":5}'
 
-**Dim 30 minutes before sunset:**
-```bash
+# Daily reboot at 3am
 curl -X POST http://YOUR_IP/schedules \
   -H "Content-Type: application/json" \
-  -d '{"index":2,"enabled":true,"mode":"relative","reference":"sunset","offset":-30,"action":"brightness","brightness":50}'
+  -d '{"index":2,"enabled":true,"mode":"absolute","hour":3,"minute":0,"action":"reboot"}'
 ```
 
 ---
 
 ## Font Guide
 
-### Available Fonts
+All fonts are Roboto Regular. Font code equals point size.
 
-Font codes equal the point size. All fonts are Roboto Regular, covering codepoints 32–255 (full Latin-1).
+| Code | Typical Use |
+|------|-------------|
+| 6–12 | Status labels, fine print |
+| 14–20 | Notices, weather body, dates |
+| 24–28 | Menu buttons, weather values |
+| 30 | **Default message font** |
+| 32–48 | Large messages |
+| 60 | **Default clock time font** |
+| 66–72 | Full-screen display |
 
-| Code | Size | Typical Use |
-|------|------|-------------|
-| 6 | 6pt | Smallest — minimal labels |
-| 8 | 8pt | Small labels ⭐ labelFont |
-| 10 | 10pt | Compact text ⭐ msgNoticeFont, astroTextFont |
-| 12 | 12pt | Small body text |
-| 14 | 14pt | — |
-| 16 | 16pt | General text, readable ⭐ suntimesFont, historyTextFont |
-| 18 | 18pt | — |
-| 20 | 20pt | Medium headlines ⭐ astroHeaderFont |
-| 22 | 22pt | — |
-| 24 | 24pt | Large headlines ⭐ weatherTempFont/weatherHumidFont |
-| 26 | 26pt | — |
-| 28 | 28pt | — |
-| 30 | 30pt | **Default message font** |
-| 32 | 32pt | — |
-| 34 | 34pt | — |
-| 36 | 36pt | Large messages |
-| 38 | 38pt | — |
-| 40 | 40pt | — |
-| 42 | 42pt | — |
-| 44 | 44pt | — |
-| 46 | 46pt | — |
-| 48 | 48pt | Maximum size ⭐ clockTimeFont |
-
-**Recommendations:**
-- **Messages:** 24pt or 30pt
-- **Clock time:** 48pt
-- **Clock date:** 16pt
-- **Clock footer label:** 8pt
-- **Unread message notice:** 10pt
-- **Weather temp/humidity:** 24pt
-- **Astro screen titles and arrows:** 20pt — `astroHeaderFont`
-- **Astro screen data rows, footer, phase name:** 10pt — `astroTextFont`
-
-### Font Files and Character Encoding
-
-The Roboto font files live in the `Fonts/` subdirectory of the sketch and are included by `RobotoFonts.h`. The files are named `Roboto_Regular<size>pt8b.h` — the `8b` suffix indicates **Latin-1 (8-bit) coverage**, meaning every character from codepoint 32 (space) through 255 (ÿ) is present in the glyph table.
-
-**Important:** Arduino GFX does **not** decode UTF-8. Its `print()` function passes each byte directly to the font table as a character index. This means:
-
-- ✅ **`\xB0`** — correct way to print a degree symbol. This is a direct single-byte index to glyph 176 (U+00B0) in the Latin-1 table.
-- ❌ **`\xC2\xB0`** — wrong. This is the UTF-8 multibyte encoding for U+00B0, but GFX renders it as two separate glyphs: `Â` (194) followed by `°` (176).
-
-The same rule applies to any Latin-1 character above 127. Use the single-byte form directly in `snprintf` format strings:
-
-```cpp
-snprintf(buf, sizeof(buf), "%.0f\xB0", angle);       // "180°"
-snprintf(buf, sizeof(buf), "%.1f\xB0""C", temp);     // "21.5°C"  (the "" separates \xB0 from C)
-snprintf(buf, sizeof(buf), "%d\xB5s", microseconds); // "42µs"
-```
-
-The `""` between `\xB0` and a following letter is required when the next character is a valid hex digit (0–9, A–F) or a letter that would extend the escape sequence.
-
-**Regenerating the fonts:** If you need to rebuild the font files (e.g. after obtaining a new TTF), use the included `ttf_to_gfxfont.py` script:
-
-```
-pip install freetype-py
-python ttf_to_gfxfont.py Roboto-Regular.ttf 0 --sizes 6 8 10 12 14 16 18 20 22 24 26 28 30 32 34 36 38 40 42 44 46 48 --outdir Fonts/
-```
-
-This produces all 22 sizes covering codepoints 32–255. Do not use `--last 127` as that reproduces the old ASCII-only `7b` behaviour and loses the extended characters.
+Valid codes: 6, 8, 10, 12, 14, 16, 18, 20, 22, 24, 26, 28, 30, 32, 36, 40, 44, 48, 54, 60, 66, 72
 
 ---
 
 ## Time and Date Formats
 
-### Time Format Codes
-
-| Code | Description | Example |
-|------|-------------|---------|
-| `%l` | Hour without leading zero (1-12) | 9 |
-| `%I` | Hour with leading zero (01-12) | 09 |
-| `%H` | Hour in 24-hour format (00-23) | 21 |
-| `%M` | Minutes with leading zero (00-59) | 45 |
-| `%S` | Seconds with leading zero (00-59) | 30 |
-| `%P` | Lowercase am/pm | am |
-| `%p` | Uppercase AM/PM | AM |
-
-**Examples:**
-
-| Format | Result |
-|--------|--------|
-| `%l:%M %P` | 9:45 am |
-| `%I:%M %p` | 09:45 AM |
-| `%H:%M` | 21:45 |
-| `%l:%M:%S %P` | 9:45:30 am |
-
----
-
-### Date Format Codes
-
-**Day:**
-
-| Code | Description | Example |
-|------|-------------|---------|
-| `%d` | Day with leading zero (01-31) | 03 |
-| `%e` | Day without leading zero (1-31) | 3 |
-| `%a` | Abbreviated weekday | Mon |
-| `%A` | Full weekday | Monday |
-
-**Month:**
-
-| Code | Description | Example |
-|------|-------------|---------|
-| `%m` | Month number with leading zero (01-12) | 11 |
-| `%b` | Abbreviated month | Nov |
+| Code | Meaning | Example |
+|------|---------|---------|
+| `%l` | Hour 1–12 | 9 |
+| `%H` | Hour 00–23 | 09 |
+| `%M` | Minutes | 45 |
+| `%P` | am/pm | am |
+| `%A` | Full weekday | Sunday |
 | `%B` | Full month | November |
-
-**Year:**
-
-| Code | Description | Example |
-|------|-------------|---------|
+| `%d` | Day 01–31 | 03 |
 | `%Y` | 4-digit year | 2025 |
-| `%y` | 2-digit year | 25 |
 
-**Examples:**
-
-| Format | Result |
-|--------|--------|
-| `%Y-%m-%d` | 2025-11-03 |
-| `%m/%d/%Y` | 11/03/2025 |
-| `%B %d, %Y` | November 03, 2025 |
-| `%A, %B %e, %Y` | Monday, November 3, 2025 |
+Defaults: `"%l:%M %P"` → `9:45 am` / `"%A  %Y-%m-%d"` → `Sunday  2025-11-23`
 
 ---
 
@@ -864,445 +824,134 @@ This produces all 22 sizes covering codepoints 32–255. Do not use `--last 127`
 
 ### Message Priority System
 
-**Two priority levels:**
-- **`normal`** - Standard messages (default)
-- **`high`** - Priority messages that can't be overridden
+**Normal** — displays immediately if no high-priority message is active; queued otherwise.
 
-**How it works:**
+**High** — interrupts normal messages. Multiple high-priority messages alternate at a configurable interval. Persists until expiry or screen tap.
 
-1. **Normal messages:** Display immediately if no message is active; added to queue if high priority message is showing
-2. **High priority messages:** Cannot be overridden by normal messages (unless override enabled); multiple high priority messages alternate every 10 seconds; remain until manually cleared or expired
-3. **Normal override mode** (configurable in User_Setup.h): When enabled, normal messages temporarily interrupt high priority; display for configured duration, then high priority returns
-
----
-
-### Brightness Settings
-
-The display uses three independent brightness levels:
-
-| Setting | `User_Setup.h` constant | `/clockconfig` param | When it applies |
-|---------|------------------------|---------------------|-----------------|
-| **Screen Brightness** | `DEFAULT_SCREEN_BRIGHTNESS` | `brightness` | All screens when Night Mode is **not** active |
-| **Night Brightness** | `DEFAULT_NIGHTMODE_BRIGHTNESS` | `nightbrightness` | Quiescent brightness during Night Mode |
-| **Night Awake Brightness** | `DEFAULT_NIGHTMODE_AWAKE_BRIGHTNESS` | `daybrightness` | Brightness when display is touched during Night Mode |
-
-**Night Mode period transitions:**
-- At **sunset** (±offset): Screen Brightness → Night Brightness
-- **Touch during Night Mode** (on any screen): Night Brightness → Night Awake Brightness for the configured wake duration, then back to Night Brightness
-- At **sunrise** (±offset): Night Brightness → Screen Brightness
+**Normal Override** — when enabled, a normal message can temporarily push aside a high-priority message for a configurable duration, then the high-priority message returns.
 
 ---
 
 ### Touch Controls
 
-**Touch interface can be disabled via `/control?touchenable=false`**
+**Clock screen:** Touch opens Menu (first touch during night mode brightens display only).
 
-**Clock screen:**
-- First touch during night mode → brightens display for wake duration (does not open menu)
-- Touch (day mode or second touch at night) → opens Menu screen
+**Message screen:** Tap dismisses current message.
 
-**Menu screen:**
-- Tap a button → navigate to that screen
+**Message History:** Swipe up/down or tap ▲/▼ to navigate. Hold **«** (500ms) to return to clock. Hold **✕** (500ms) to clear history.
 
-**Message screen (active message):**
-- Tap anywhere → dismiss current message and return to clock
+**Weather screen:** Tap returns to clock.
 
-**Message History screen:**
-- Swipe up → next message
-- Swipe down → previous message
-- Tap ▲/▼ arrows (right edge) → next/previous message
-- Hold **«** button (lower-left, 500ms) → return to clock
-- Hold **✕** button (lower-right, 500ms) → clear all history
-- Long press anywhere open (2s, excluding control zones) → return to clock
-- When queue is empty → any touch returns to clock immediately
+**Calendar screen:** Tap ◄/► to change month; tap title to return to current month; tap data area for clock.
 
-**Weather screen:**
-- Tap anywhere → return to clock
-
-**Calendar screen:**
-- Tap ◄ triangle (left header) → previous month
-- Tap ► triangle (right header) → next month
-- Tap Month/Year label (center header) → return to today's month
-- Tap below header → return to Clock
-
-**Astro Times screen:**
-
-Both the Sun and Moon pages share the same five-zone touch layout:
-
-| Zone | Location | Action |
-|------|----------|--------|
-| Left arrow `<` | Header row, left 90 px | Go back one day |
-| Title ("Sun" or "Moon") | Header row, centre | Reset to today's date |
-| Right arrow `>` | Header row, right 90 px | Go forward one day |
-| Footer ("Tap here for Moon/Sun") | Bottom ~25 px | Switch between Sun and Moon pages |
-| Data area | Everything else | Return to Clock |
-
-**All screens — night mode:** When night mode is active and the display is dimmed, the first touch (anywhere) brightens the display to Night Awake Brightness without performing any navigation action. A second touch performs the normal action for that screen.
+**Astro screen:** Tap ◄/► to change date; tap title to toggle Sun/Moon page; tap footer for clock.
 
 ---
 
 ### Pixel Shift (Anti Burn-In)
 
-When enabled, the display content is shifted by 1–2 pixels every few minutes. This prevents static elements (clock digits, labels) from burning into the panel over time.
-
-**Enable/disable:**
-```json
-POST /control
-{"pixelshift": true}
-```
+Shifts display content by 1–2 pixels every 5 minutes to prevent static element burn-in. Enable: `POST /control {"pixelshift":true}`.
 
 ---
 
 ### Message History
 
-Received messages are stored in a scrollable history (capacity configured in `User_Setup.h`). The history screen shows one message at a time with a progress bar indicating position.
-
-- Navigate with swipe gestures or the ▲/▼ arrows (right edge)
-- Hold **«** (lower-left) 500ms to return to clock
-- Hold **✕** (lower-right) 500ms to clear all history
-- The **«** and **✕** buttons are only shown when history contains messages
-- Unread messages are marked; viewing a message marks it as read
-- Messages older than `maxmsgage` hours are purged automatically (0 = disabled)
-- History is also viewable via the `/status` endpoint
-
-Set history age limit:
-```bash
-curl -X POST http://YOUR_IP/control \
-  -H "Content-Type: application/json" \
-  -d '{"maxmsgage":24}'
-```
+Scrollable history of received messages. Navigate by swipe or arrows. Messages older than `maxmsgage` hours are automatically purged (0 = disabled).
 
 ---
 
 ### Weather & Calendar
 
-**Weather screen:**
-- Shows temperature (actual and feels-like), humidity, air pressure (local and from service), weather description, and icon.
-- Daily temperature highs and lows (actual and feels-like), amount of precipitation ("Wet"), and chance of precipitation.
-- Navigate: `GET /weather` or `POST /control {"weather": true}`
-
-**Calendar screen:**
-- Shows the current month with today's date highlighted
-- Navigate: `GET /calendar` or `POST /control {"calendar": true}`
-
-**Interactive calendar navigation:**
-
-| Touch zone | Action |
-|------------|--------|
-| ◄ triangle (left edge of header) | Go to previous month |
-| ► triangle (right edge of header) | Go to next month |
-| Month/Year label (center of header) | Return to today's month |
-| Anywhere below the header | Return to Clock |
-
-**Dark mode:**
-```json
-POST /control
-{
-  "weatherdark": true,
-  "calendardark": true
-}
-```
-
-**Temperature display mode** (control via `/control tempactual`):
-- `true` — actual temperature
-- `false` — apparent (feels-like) temperature
-- `"alternate"` — cycles between actual and apparent
-
-#### Local Air Pressure
-
-When `HUBITAT_PRESSURE_URL` is defined in `secrets.h`, the device fetches averaged air pressure readings from a local Hubitat Maker API endpoint every 5 minutes. This supplements the Open-Meteo model pressure with readings from physical sensors on your LAN.
-
-The endpoint must return JSON in the following format:
-```json
-{"hpa": 1013.5, "sensors": 2, "age_seconds": 30}
-```
-
-**Display behaviour:**
-- When fresh local data is available (received within the last 30 minutes), it is shown on the weather screen as a plain number (e.g. `1013.5 hPa`).
-- Open-Meteo pressure is always shown with a `~` prefix (e.g. `~1012.3 hPa`) to distinguish it as a model estimate.
-- When no `HUBITAT_PRESSURE_URL` is configured, or when local data has gone stale, the weather screen falls back to Open-Meteo pressure only.
-- By default (`apAlternate: true` in `User_Setup.h`), the display alternates between the local reading and the Open-Meteo estimate every 5 seconds. Set `DEFAULT_AP_ALTERNATION_MODE = false` to always show the local reading.
-
-**Pushing a reading from Hubitat instead of polling:**
-
-If you prefer Hubitat to push pressure data to the device rather than having the device poll, use `POST /control` with the `localpressure` key:
-
-```bash
-curl -X POST http://YOUR_IP/control \
-  -H "Content-Type: application/json" \
-  -d '{"localpressure": 1016}'
-```
-
-The value must be an integer in hPa between 800 and 1200. The device accepts the push, updates its local pressure state, and refreshes the weather screen immediately if it is currently displayed. Both polling and push can be used together — whichever updates the value most recently wins.
-
-Auto-cycle behaviour (weather and calendar screens cycle automatically from the clock screen at configurable intervals) is controlled via `weathercycle`, `calendarcycle`, `wxshowdur`, `wxcycleint`, `calshowdur`, `calcycleint` in `/control`.
+Weather from Open-Meteo API — no API key required. Shows current conditions, 3-day forecast, and astronomical sun times. Calendar shows current month with today highlighted.
 
 ---
 
 ### Astro Times (Sun & Moon)
 
-The Astro Times screen is accessed from the **Menu** (tap the clock face to open the 6-button menu, then tap **Astro Times**). It shows two sub-pages, toggled by tapping the footer row.
+Computed locally using Jean Meeus algorithms from the latitude, longitude, and timezone configured via the **📍 Location** page (`/locationconfig`).
 
-#### Sun Page
+**Sun page:** all twilight times, solar noon, day length.
+**Moon page:** moonrise/set, illumination, phase name and graphic.
 
-Displays all solar events for today in chronological order:
-
-| Event | Description |
-|-------|-------------|
-| Astro. Dawn | Sun 18° below horizon — sky starts to lighten |
-| Nautical Dawn | Sun 12° below horizon |
-| Civil Dawn | Sun 6° below horizon — outdoor activities possible |
-| Sunrise | Upper limb of sun touches the horizon |
-| Solar Noon | Sun at maximum elevation for the day |
-| Sunset | Upper limb of sun leaves the horizon |
-| Civil Dusk | Sun 6° below horizon |
-| Nautical Dusk | Sun 12° below horizon |
-| Astro. Dusk | Sun 18° below horizon — astronomical dark |
-| Day Length | Duration from sunrise to sunset |
-
-All times are displayed in the device's configured clock time format (12-hour or 24-hour, matching the clock face).
-
-#### Moon Page
-
-| Field | Description |
-|-------|-------------|
-| Moonrise | Time the moon rises above the horizon |
-| Moonset | Time the moon sets below the horizon |
-| Illumination | Percentage of the visible disk that is lit |
-| Phase Angle | 0° = New Moon, 180° = Full Moon |
-| Phase graphic | Rendered disk showing current illumination |
-| Phase name | New Moon, Waxing Crescent, First Quarter, Waxing Gibbous, Full Moon, Waning Gibbous, Last Quarter, or Waning Crescent |
-
-If the moon does not rise or set on a given day, the field shows "No rise", "No set", or "Always up" as appropriate.
-
-#### Clock and Weather Screens
-
-The sunrise/sunset and moonrise/moonset times shown on the Clock and Weather screens use the same locally-computed astronomical data. The Clock screen shows a contextual two-line display:
-
-- **Before sunrise:** Sunrise time and Moonrise time (line 1) · Sunset time and Moonset time (line 2)
-- **After sunrise, before sunset:** Sunset time and Moonset time (line 1) · Tomorrow's sunrise and moonrise (line 2)
-- **After sunset:** Tomorrow's sunrise and moonrise (line 1) · Tomorrow's sunset and moonset (line 2)
-
-Moon rise/set lines are omitted if the moon has no rise or set event for that day.
-
-#### Astronomical Calculation Engine
-
-Calculations are performed locally on the ESP32 using the Jean Meeus *Astronomical Algorithms* method, ported from the WeekCalendar JavaScript application (SunMoonInfo.js / DayInfo.js). The source files are `AstroCalc.h` and `AstroCalc.cpp`.
-
-**Accuracy:** Typically within 1–2 minutes of published tables for mid-latitude locations.
-
-**Required configuration:** Set latitude, longitude, and POSIX TZ string via the
-**📍 Location** page (`http://YOUR_IP/locationconfig`). These values are stored in
-NVS and loaded at boot.
-
-**Important:** Longitude must use standard cartographic convention (western longitudes are negative,
-e.g. `-117.16` for San Diego). This is the same value used by the Open-Meteo weather API.
-
-**DST handling:** The UTC offset is derived at runtime by comparing local and UTC wall clock values from the same Unix timestamp. This automatically reflects DST transitions without any additional configuration.
-
-**Caching:** Today's and tomorrow's astronomical data are computed once per calendar day and cached. The cache is refreshed automatically at the first draw after midnight. When browsing other dates via the header arrows, data for the viewed date is computed on demand and cached separately from the today/tomorrow cache.
-
-#### Dark Mode
-
-The Astro Times screen has its own independent dark mode flag, defaulting to dark:
-
-```json
-POST /control
-{"astrodark": true}
-```
-
-The dark/light colors are defined in `User_Setup.h` as `DEFAULT_ASTRO_*_COLOR` constants.
+Browse by date with ◄/► arrows. Accurate to within a few minutes worldwide.
 
 ---
 
 ## Testing
 
-The sketch includes support for three levels of testing: an automated HTTP test suite, a test injection endpoint for state-dependent behavior, and a manual visual checklist.
-
----
-
 ### HTTP Test Suite
 
-**`test_multidisplay.py`** is a Python script that runs against a live device and exercises all HTTP endpoints systematically.
+`test_multidisplay.py` exercises all HTTP endpoints against a live device.
 
-#### Requirements
-
-- Python 3.10 or newer
-- `requests` library: `pip install requests`
-
-#### Running the Suite
-
-```
+```bash
+pip install requests
 python test_multidisplay.py --ip 192.168.1.x
-```
-
-Run a single group:
-```
 python test_multidisplay.py --ip 192.168.1.x --group messages
 ```
 
-Available groups: `endpoints`, `messages`, `effects`, `priority`, `profiles`, `clockconfig`, `control`, `schedules`, `nightmode`, `edge`
+Groups: `endpoints`, `messages`, `effects`, `priority`, `profiles`, `clockconfig`, `control`, `schedules`, `nightmode`, `edge`
 
----
+### MQTT Testing
 
-### Test Inject Endpoint
-
-> **Note:** `ENABLE_TEST_MODE` is set to `false` by default. The `/testinject` endpoint is compiled out and unavailable unless you set it to `true` in `User_Setup.h` for a development build.
-
-The `/testinject` endpoint allows automated tests to inject artificial sun times and force an immediate night mode evaluation. Compiled in only when `ENABLE_TEST_MODE true` is set in `User_Setup.h`.
-
-#### GET /testinject — Read Current State
-
-```bash
-curl http://YOUR_IP/testinject
-```
-
-**Response fields:**
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `nightModeActive` | bool | Whether night mode is currently active |
-| `nightModeEnabled` | bool | Whether night mode is enabled in settings |
-| `nightModeWakeActive` | bool | Whether a touch-wake is currently in effect |
-| `nightModeBrightness` | int | Configured night brightness (0–255) |
-| `nightModeAwakeBrightness` | int | Configured brightness when touched during night mode |
-| `screenBrightness` | int | Current screen brightness |
-| `sunsetOffset` | int | Configured sunset offset in minutes |
-| `sunriseOffset` | int | Configured sunrise offset in minutes |
-| `sunriseHour` | int | Current sunrise hour |
-| `sunriseMinute` | int | Current sunrise minute |
-| `sunsetHour` | int | Current sunset hour |
-| `sunsetMinute` | int | Current sunset minute |
-| `sunTimesValid` | bool | Whether sun times are considered valid |
-| `currentScreen` | int | Active screen: 0=Clock, 1=Menu, 2=Message, 3=Messages, 4=Weather, 5=Calendar, 6=Astro, 7=About |
-
-#### POST /testinject — Inject Test Values
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `sunsethour` | int | Override `sunsetHour` |
-| `sunsetminute` | int | Override `sunsetMinute` |
-| `sunrisehour` | int | Override `sunriseHour` |
-| `sunriseminute` | int | Override `sunriseMinute` |
-| `sunrisehourtomorrow` | int | Override `tomorrowSunriseHour` |
-| `sunriseminutetomorrow` | int | Override `tomorrowSunriseMinute` |
-| `setsuntimesvalid` | bool | Set `sunTimesValid` |
-| `forcenightcheck` | bool | Reset debounce timer and call `updateNightMode()` immediately |
-
-#### Example: Force Night Mode Active
-
-```bash
-curl -X POST http://YOUR_IP/testinject \
-  -H "Content-Type: application/json" \
-  -d '{
-    "sunsethour": 6,
-    "sunsetminute": 0,
-    "sunrisehour": 2,
-    "sunriseminute": 0,
-    "setsuntimesvalid": true,
-    "forcenightcheck": true
-  }'
-```
-
----
-
-### Visual Verification Checklist
-
-**`visual_checklist.md`** is a structured checklist for manual display verification covering all screens, message effects, night mode transitions, touch controls, auto-cycle behavior, screensaver, schedules, and persistence across reboots.
+Use **MQTT Explorer** (`https://mqtt-explorer.com`) to:
+- Monitor all topics flowing through the broker in real time
+- Publish test messages to any topic
+- Verify Hubitat device state publications
+- Confirm CYD forwarding (watch Serial Monitor for `MQTT Fwd [...] OK`)
 
 ---
 
 ## Troubleshooting
 
-### Text Issues
+### MQTT Issues
 
-**Text not wrapping?** Enable `wrap: true` in message JSON.
+**No clients connecting?** Verify broker IP in client configuration. Confirm port 1883. Check Serial Monitor for `MQTT: broker started on port 1883`.
 
-**Text cut off?** Try smaller font, enable wrapping, or reduce text length.
+**Hubitat MQTT Export Integration shows "not connected"?** Verify the device IP hasn't changed (set a DHCP reservation in your router). Confirm no credentials are needed. Try Save and reconnect.
 
-**Colors not showing?** Use named colors ("red", "blue") or hex ("#FF0000"). Check brightness isn't 0.
+**Flood of `homeassistant/` topics in Serial Monitor?** Known Hubitat beta bug — HA discovery traffic is published even when that option is disabled. These are filtered and have no effect. Report to Hubitat community.
+
+**CYD forwarding failing with HTTP 303?** Normal — some CYD sketches redirect after `/clear`. The sketch treats 2xx and 3xx as success. No action needed.
+
+**CYD forwarding failing with HTTP -1?** The CYD is offline or unreachable. Check its IP in `displays.json`.
 
 ---
 
 ### Display Issues
 
-**Flash not working?** Check `flashinterval` (recommended: 500-5000ms). Ensure `flash: true`.
+**Weather screen shows `~` prefix only?** Open-Meteo pressure is showing because local pressure hasn't arrived yet. Wait 10–30 seconds after boot for Hubitat to reconnect and publish. If it never arrives, check that the pressure device is added to Hubitat MQTT Export Integration and that `HUBITAT_PRESSURE_DEVICE_ID` in `User_Setup.h` matches the Hubitat device ID. Check Serial Monitor for `MQTT: local pressure updated`.
 
-**Scroll too fast/slow?** Adjust `scrollspeed` (1-9).
+**Text not wrapping?** Enable `wrap: true` in message JSON.
 
-**Display too dim?** Increase brightness to 255. Check night mode and screensaver aren't active.
-
-**Weather screen shows `~` prefix on pressure reading?** The `~` prefix indicates the value is from the Open-Meteo model estimate. A reading without the prefix is from your local sensors via `HUBITAT_PRESSURE_URL`. If you expect a local reading but see `~` only, verify `HUBITAT_PRESSURE_URL` is defined in `secrets.h`, that the Hubitat endpoint is reachable from the device, and that it returns `{"hpa": ...}` JSON. Check the `/logs` page for fetch error messages.
+**Display too dim?** Increase brightness to 5. Check night mode and screensaver are not active.
 
 ---
 
 ### Clock Issues
 
-**Clock not showing?** Enable via `/clockconfig?clockenable=true` or `POST /control {"clockenable": true}`.
+**Clock not showing?** `POST /control {"clockenable":true}`.
 
-**Clock colors wrong?** Reset: `POST /control {"clockresetcolors": "dark"}`.
-
-**Time wrong?** Check WiFi (NTP sync requires WiFi). Verify the **POSIX TZ String** on the Location config page (`http://YOUR_IP/locationconfig`). Check `/time` endpoint.
+**Time wrong?** Verify the **POSIX TZ String** on the Location config page (`http://YOUR_IP/locationconfig`). Check `http://YOUR_IP/time`.
 
 ---
 
-### Astro Times Issues
+### Serial Issues
 
-**Times off by an hour?** Verify the **POSIX TZ String** on the Location config page matches your timezone and DST rules. Example for US Pacific: `PST8PDT,M3.2.0,M11.1.0`.
-
-**Solar noon or sunrise/sunset grossly wrong (many hours off)?** Verify that the **Longitude** on the Location config page uses standard cartographic convention — western longitudes should be **negative** (e.g., `-117.16` for San Diego). A positive longitude for a western location will produce incorrect results.
-
-**Moon phase graphic appears all dark or all bright?** This is expected behavior for New Moon (0%) or Full Moon (100%). The graphic renders correctly for all intermediate phases.
-
-**"Calculating..." shown on Astro screen?** The astronomical data has not been computed yet. This normally resolves within a second of first opening the Astro screen. If it persists, check that NTP time is synced (the calculation requires a valid date).
-
----
-
-### Network Issues
-
-**mDNS not working?** Use IP address instead of `.local` name. Check device IP on serial monitor during boot.
-
-**Can't connect to WiFi?** Verify SSID and password in `secrets.h`. Check WiFi signal. Ensure 2.4GHz WiFi.
-
-**Weather or astro data wrong location?** Open `http://YOUR_IP/locationconfig` and verify your latitude, longitude, and timezone are correctly set.
-
-**HTTP requests failing?** Check device is on same network. Verify correct IP. Try `http://YOUR_IP/time` first.
-
----
-
-### OTA Update Issues
-
-**Update fails?** Ensure stable WiFi connection. Use correct .bin file. Verify OTA password if set.
+**No output after flashing?** Set `Tools → USB CDC On Boot → Disabled`. The CH340K UART appears as "USB-SERIAL CH340K" in Device Manager. Seeing ROM boot lines but nothing after is the telltale sign of CDC being enabled.
 
 ---
 
 ### Compilation Issues
 
-**Board not found?** Ensure ESP32 board package installed in Arduino IDE. Select "ESP32S3 Dev Module".
+**"not declared in scope" cascade for every function?** A class definition in a `.ino` file is defeating Arduino's prototype generator. Ensure `MQTTBroker.ino` contains no class definitions — the broker class must stay in `MQTTBroker.cpp`.
 
-**Partition errors?** Verify `partitions.csv` is in sketch folder. Select custom partition scheme in Tools menu.
-
-**Memory errors?** Reduce `LOG_BUFFER_SIZE` in `User_Setup.h`. Disable unused features.
-
-**Library conflicts?** If you see errors like `expected type-specifier before 'Arduino_ESP32QSPI'`, add an explicit include: `#include "databus/Arduino_ESP32QSPI.h"` after the `Arduino_GFX_Library.h` include. This can occur when multiple versions of the GFX library are installed.
+**Partition errors?** Verify `partitions.csv` is in the sketch folder and `Tools → Partition Scheme → Custom` is selected.
 
 ---
 
-## Changelog
+### OTA Issues
 
-### v2.0.8 — 2026-05-23
-
-**Bug fixes and hardening (static audit pass):**
-
-- **`ENABLE_ARDUINO_OTA` flag now fully controls Arduino OTA.** Previously the flag only guarded the OTA password refresh; `ArduinoOTA.begin()`, its callbacks, and `ArduinoOTA.handle()` ran unconditionally. All Arduino OTA setup and polling are now wrapped in `#if ENABLE_ARDUINO_OTA`. Web OTA (`/update`) is unaffected and always available.
-- **`ENABLE_TEST_MODE` defaults to `false`.** The `/testinject` endpoint can alter runtime state without authentication. It is now compiled out by default; set `ENABLE_TEST_MODE true` in `User_Setup.h` only for development builds.
-- **Scheduled screen changes now go through `changeScreen()`.** Previously the scheduler set `currentScreen` directly and called draw functions, bypassing the screensaver reset, brightness handling, rotation, and auto-cycle timer logic in `changeScreen()`. Scheduled clock/weather/calendar actions now behave identically to manual navigation.
-- **Scheduler POST input validation.** Hour, minute, and brightness are now clamped to valid ranges; action, mode, and reference strings are whitelist-checked. Malformed direct API POSTs can no longer store out-of-range values.
-- **Removed unused `showWeatherScreen()` / `showCalendarScreen()` / `showClockScreen()` wrappers** from `TouchInput.ino`. These were one-line `changeScreen()` wrappers with no call sites.
-- **`resetSettings()` in `Settings.ino` documented as unused** but retained as the canonical consolidation point for future reset logic.
-- **`getWeatherIcon()` and `getWeatherIconColor()` in `WeatherCalendar.ino` marked as superseded** — the bitmap icon path (`getWeatherIconArrays()`) replaced them; retained for reference.
-- **PSRAM helper utilities** (`isLowMemory`, `PSRAMStringBuffer`, `WeatherIconCache`, etc.) marked as intentionally retained for future use.
-- **Comment and documentation fixes:** wrong hardware name in README and `partitions.csv` corrected; stale OTA handler location comment in `HTML.cpp` updated; `User_Setup.h` typos (`"Non volitile"`, `"calender"`) fixed.
+**Web OTA fails?** Use `http://YOUR_IP/update`. Ensure stable WiFi. Correct `.bin` file. Verify OTA password if set.
 
 ---
 
@@ -1310,10 +959,10 @@ curl -X POST http://YOUR_IP/testinject \
 
 **Dedicated to the public domain in 2025.**
 
-Unless required by applicable law or agreed to in writing, this software is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+Distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND.
 
 ---
 
 **Author:** John Land
 **Last Updated:** 2026-05-23
-**Version:** 2.0.8
+**Version:** 3.1-EL-MQTT
